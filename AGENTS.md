@@ -84,7 +84,7 @@ Fields live in `~/.codex/ucode.config.toml` and `/etc/codex/managed_config.toml`
 | `model` | Ignore | Create/replace | The config's default model |
 | `model_providers.Databricks` | Merge | Merge | Provider block: name, gateway base URL, wire API, `ug` auth command; other keys left alone |
 | `http_headers` | Merge | Merge | In `[model_providers.Databricks]`; merge `ug`'s routing headers by name, admin headers added under managed config |
-| `model_catalog_json` | Create/replace | Create/replace | In `~/.codex/config.toml`; `ug`'s own catalog reference, for a static model list |
+| `model_catalog_json` | Ignore | Create/replace | Enforced in the managed file for a managed static model list (mirrors Claude's model picker); the same reference is also written to `~/.codex/ucode.config.toml` and the app's `~/.codex/config.toml`. A provider/parent launch resolves no static catalog, so the managed reference is removed |
 | `mcp_servers` | Ignore | Merge | Managed file; add/update the config's MCP server entries, other entries left alone |
 
 </details>

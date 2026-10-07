@@ -61,6 +61,7 @@ from ucode.managed_files import (
     managed_file_conflicts,
     managed_file_is_verified,
     managed_file_scope,
+    managed_file_snapshots,
     managed_file_status,
     managed_files_supported,
     managed_writes_allowed,
@@ -121,6 +122,7 @@ MANAGED_KEYS: list[list[str]] = [
     ["model"],
     ["model_providers", CODEX_MODEL_PROVIDER_NAME],
     ["model_providers", CODEX_MODEL_PROVIDER_NAME, "http_headers"],
+    ["model_catalog_json"],
 ]
 
 LEGACY_MANAGED_KEYS: list[list[str]] = [
@@ -511,7 +513,18 @@ def write_tool_config(
         enabled=False,
     )
     write_toml_file(CODEX_CONFIG_PATH, doc)
-    _reconcile_managed_config(state, lambda base: compose(base, include_catalog=False))
+    ug_managed_catalog = _ug_last_applied_managed_catalog()
+
+    def compose_managed(base: dict) -> dict:
+        prior_catalog = base.get("model_catalog_json")
+        compose(base, include_catalog=False)
+        if catalog_path:
+            base["model_catalog_json"] = catalog_path
+        elif prior_catalog is not None and str(prior_catalog) == ug_managed_catalog:
+            base.pop("model_catalog_json", None)
+        return base
+
+    _reconcile_managed_config(state, compose_managed)
     state = mark_tool_managed(state, "codex", MANAGED_KEYS)
     save_state(state)
     return state
@@ -580,6 +593,13 @@ def revert_managed_config() -> str:
         parser=_parse_managed_config,
         dumper=tomlkit.dumps,
     )
+
+
+def _ug_last_applied_managed_catalog() -> str | None:
+    """The ``model_catalog_json`` ug last wrote to the managed file, or ``None``."""
+    snapshots = managed_file_snapshots("codex", _parse_managed_config)
+    value = (snapshots.last_applied_by_ug or {}).get("model_catalog_json")
+    return str(value) if value is not None else None
 
 
 def _reconcile_managed_config(state: dict, compose: Callable[[dict], dict]) -> None:

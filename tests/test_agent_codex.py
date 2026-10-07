@@ -5,6 +5,7 @@ from __future__ import annotations
 import json
 import os
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import Mock
 
 import pytest
@@ -206,7 +207,11 @@ class TestRenderOverlayUserAgent:
     def test_managed_keys_include_http_headers(self):
         # Revert must clean up the new key.
         assert ["model_providers", "Databricks", "http_headers"] in codex.MANAGED_KEYS
-        assert ["model_catalog_json"] not in codex.MANAGED_KEYS
+
+    def test_managed_keys_include_model_catalog(self):
+        # Owning the catalog key lets reconcile remove a stale static catalog when a
+        # launch switches to dynamic discovery (mirrors Claude's picker-key revert).
+        assert ["model_catalog_json"] in codex.MANAGED_KEYS
 
 
 class TestCodexWriteConfig:
@@ -1640,6 +1645,59 @@ class TestCodexManagedConfig:
         assert "Databricks" in doc["model_providers"]
         assert read_toml_safe(config_path)["model_provider"] == "Databricks"
 
+    def test_writes_static_catalog_to_managed_config(self, tmp_path, monkeypatch):
+        # A static model list is enforced in the managed file too, mirroring Claude's
+        # managed availableModels/modelPicker.
+        config_path, managed_path = self._patch(tmp_path, monkeypatch)
+        monkeypatch.setattr(codex, "CODEX_MODEL_CATALOG_PATH", tmp_path / "catalog.json")
+        monkeypatch.setattr(
+            codex, "prepare_codex_catalog", lambda binary, names: {"models": [{"slug": "gpt-5"}]}
+        )
+        state = {"workspace": WS, "codex_static_models": ["gpt-5"]}
+        codex.write_tool_config(state)
+
+        catalog_ref = str(tmp_path / "catalog.json")
+        assert read_toml_safe(managed_path)["model_catalog_json"] == catalog_ref
+        assert read_toml_safe(config_path)["model_catalog_json"] == catalog_ref
+
+    def test_provider_configure_removes_ug_owned_managed_catalog(self, tmp_path, monkeypatch):
+        # A provider launch resolves no static catalog, so re-reconciling the managed file
+        # strips a catalog ug itself wrote earlier, which would otherwise shadow discovery.
+        _, managed_path = self._patch(tmp_path, monkeypatch)
+        monkeypatch.setattr(codex, "CODEX_MODEL_CATALOG_PATH", tmp_path / "catalog.json")
+        managed_path.parent.mkdir(parents=True, exist_ok=True)
+        managed_path.write_text('model_catalog_json = "/tmp/ug-owned.json"\n', encoding="utf-8")
+        monkeypatch.setattr(
+            codex,
+            "managed_file_snapshots",
+            lambda tool, parser: SimpleNamespace(
+                last_applied_by_ug={"model_catalog_json": "/tmp/ug-owned.json"}
+            ),
+        )
+        codex.write_tool_config(
+            {"workspace": WS, "codex_static_models": ["gpt-5"]}, provider="my-service"
+        )
+
+        assert "model_catalog_json" not in read_toml_safe(managed_path)
+
+    def test_provider_configure_preserves_admin_managed_catalog(self, tmp_path, monkeypatch):
+        # A catalog ug never wrote is an admin's own entry; a provider launch must leave it so
+        # _reject_managed_model_catalog can block it rather than silently overriding admin policy.
+        _, managed_path = self._patch(tmp_path, monkeypatch)
+        monkeypatch.setattr(codex, "CODEX_MODEL_CATALOG_PATH", tmp_path / "catalog.json")
+        managed_path.parent.mkdir(parents=True, exist_ok=True)
+        managed_path.write_text('model_catalog_json = "/admin/models.json"\n', encoding="utf-8")
+        monkeypatch.setattr(
+            codex,
+            "managed_file_snapshots",
+            lambda tool, parser: SimpleNamespace(last_applied_by_ug=None),
+        )
+        codex.write_tool_config(
+            {"workspace": WS, "codex_static_models": ["gpt-5"]}, provider="my-service"
+        )
+
+        assert read_toml_safe(managed_path)["model_catalog_json"] == "/admin/models.json"
+
     @pytest.mark.parametrize("previous_provider", ["ucode-databricks", "databricks"])
     def test_reconfigure_selects_databricks_in_existing_profile_and_managed_config(
         self, tmp_path, monkeypatch, previous_provider
@@ -1796,6 +1854,12 @@ class TestCodexManagedConfig:
             "[model_providers.Databricks.http_headers]\n"
             'Databricks-Model-Provider-Service = "main.default.stale"\n',
             encoding="utf-8",
+        )
+        # ug never wrote this catalog, so it is treated as an admin entry and left in place.
+        monkeypatch.setattr(
+            codex,
+            "managed_file_snapshots",
+            lambda tool, parser: SimpleNamespace(last_applied_by_ug=None),
         )
 
         codex.write_tool_config(
